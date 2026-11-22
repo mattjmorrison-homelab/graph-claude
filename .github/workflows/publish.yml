@@ -1,0 +1,74 @@
+name: Publish
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  publish:
+    runs-on: k8s-amd64
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Build and push the test-stage image
+        uses: mattjmorrison-homelab/actions-k8s@955b466878ae777505b822bb6c241f4f4e6805b5 # main
+        with:
+          service-account: graph-claude-job
+          image: gcr.io/kaniko-project/executor@sha256:4e7a52dd1f14872430652bb3b027405b8dfd17c4538751c620ac005741ef9698
+          shell: "false"
+          command: >-
+            --context=git://github.com/mattjmorrison-homelab/graph-claude.git#refs/heads/main
+            --dockerfile=Dockerfile --skip-unused-stages=true --target=test --destination=registry.morrisons.site/graph-claude-test:${{ github.sha }}
+          secret-volume: graph-claude-zot-pull-secret:/kaniko/.docker
+          active-deadline-seconds: "1800"
+
+      - name: Run tests inside the just-built test image
+        uses: mattjmorrison-homelab/actions-k8s@955b466878ae777505b822bb6c241f4f4e6805b5 # main
+        with:
+          service-account: graph-claude-job
+          image: registry.morrisons.site/graph-claude-test:${{ github.sha }}
+          command: uv run pytest
+
+      - name: Build and push the release image
+        uses: mattjmorrison-homelab/actions-k8s@955b466878ae777505b822bb6c241f4f4e6805b5 # main
+        with:
+          service-account: graph-claude-job
+          image: gcr.io/kaniko-project/executor@sha256:4e7a52dd1f14872430652bb3b027405b8dfd17c4538751c620ac005741ef9698
+          shell: "false"
+          command: >-
+            --context=git://github.com/mattjmorrison-homelab/graph-claude.git#refs/heads/main
+            --dockerfile=Dockerfile --skip-unused-stages=true --target=release --build-arg=COMMIT_SHA=${{ github.sha }}
+            --destination=registry.morrisons.site/graph-claude:${{ github.sha }}
+          secret-volume: graph-claude-zot-pull-secret:/kaniko/.docker
+          active-deadline-seconds: "1800"
+
+      - run: sh scripts/verify-deploy.sh
+        env:
+          CI_COMMIT_SHA: ${{ github.sha }}
+
+      - name: Fetch GitHub dispatch token
+        uses: mattjmorrison-homelab/actions-openbao@dc591bde3eb71f6c6523c700060facbf6e06b362 # main
+        with:
+          role: graph-claude-dispatch
+          kv-path: homelab/graph-router/github-dispatch-token
+          output-name: GITHUB_DISPATCH_TOKEN
+
+      - name: Trigger graph-router rebuild
+        uses: mattjmorrison-homelab/actions-workflow-dispatch@82e99382b6544893cfc25f358191f2ea5a0029b4 # main
+        with:
+          repo: mattjmorrison-homelab/graph-router
+          workflow: publish.yml
+          token: ${{ env.GITHUB_DISPATCH_TOKEN }}
+
+      - name: Notify Discord on failure
+        if: failure()
+        uses: mattjmorrison-homelab/actions-openbao@a9a15ee54f4b6a08b17ddd55df99d5109cfb5748 # main
+        with:
+          role: graph-claude-discord
+          kv-path: homelab/service/admin-discord/graph-claude/webhook-url
+          output-name: DISCORD_WEBHOOK_URL
+      - if: failure()
+        run: >-
+          curl -sf -H "Content-Type: application/json" -X POST
+          -d "{\"content\": \"🔴 **graph-claude** build failed — ${{ github.sha }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}"
+          "$DISCORD_WEBHOOK_URL"
