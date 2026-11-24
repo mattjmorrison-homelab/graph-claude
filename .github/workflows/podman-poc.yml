@@ -1,0 +1,54 @@
+name: Podman POC
+
+on:
+  pull_request:
+
+jobs:
+  podman-poc:
+    runs-on: k8s-amd64
+    steps:
+      - name: Build and run a container with rootless podman, vfs storage
+        run: |
+          set -e
+
+          echo "--- whoami / id ---"
+          whoami
+          id
+
+          echo "--- os-release ---"
+          cat /etc/os-release || true
+
+          echo "--- checking for podman ---"
+          if ! which podman; then
+            echo "podman not found, attempting install via apt"
+            if [ "$(id -u)" = "0" ]; then
+              apt-get update && apt-get install -y podman
+            elif sudo -n true 2>/dev/null; then
+              sudo apt-get update && sudo apt-get install -y podman
+            else
+              echo "No root/sudo available on this runner - cannot install podman. Failing."
+              exit 1
+            fi
+          fi
+
+          podman --version
+
+          WORKDIR=$(mktemp -d)
+          cd "$WORKDIR"
+
+          echo "hello from podman-poc" > marker.txt
+
+          cat > Dockerfile <<'EOF'
+          FROM docker.io/library/busybox:latest
+          COPY marker.txt /marker.txt
+          EOF
+
+          echo "--- building image ---"
+          podman --storage-driver=vfs build -t podman-poc:test .
+
+          echo "--- running container: success case ---"
+          podman --storage-driver=vfs run --rm podman-poc:test sh -c 'cat /marker.txt && echo PODMAN_POC_SUCCESS_MARKER'
+
+          echo "--- running container: deliberate failure case ---"
+          podman --storage-driver=vfs run --rm podman-poc:test sh -c 'echo about to fail on purpose; exit 1'
+          echo "This line must never print - the exit 1 above must fail the step"
